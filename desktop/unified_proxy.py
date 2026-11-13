@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from raccoon_adapter import INTERNAL_KEY, catalog, check_model_echo
 from raccoon_protocols import adapted_stream, from_chat, to_chat
+from model_rewrite import ModelResponseRewriter, public_model_fields
 
 SERVICE = "agent-gateway-workbuddy-node"
 LOCAL_KEY_NAME = "unified-local-key"
@@ -145,10 +146,16 @@ async def forward(request: Request, path: str):
                     async for chunk in adapted_stream(path, first, stream, native, model_id, adapter_messages):
                         yield chunk
                 else:
+                    rewriter = ModelResponseRewriter(native, model_id, content_type, MAX_BODY) if upstream.status_code < 400 else None
                     if first:
-                        yield first
+                        for chunk in rewriter.feed(first) if rewriter else (first,):
+                            yield chunk
                     async for chunk in stream:
-                        yield chunk
+                        for translated in rewriter.feed(chunk) if rewriter else (chunk,):
+                            yield translated
+                    if rewriter:
+                        for chunk in rewriter.finish():
+                            yield chunk
             finally:
                 await upstream.aclose()
                 await client.aclose()
@@ -165,6 +172,8 @@ async def forward(request: Request, path: str):
             raise HTTPException(502, str(exc))
         if adapter_messages is not None:
             parsed = from_chat(path, parsed, model_id, adapter_messages)
+    if upstream.status_code < 400:
+        parsed = public_model_fields(parsed, native, model_id)
     return JSONResponse(content=parsed,
                         status_code=upstream.status_code)
 

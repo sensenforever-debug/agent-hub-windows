@@ -27,7 +27,7 @@ powershell -ExecutionPolicy Bypass -File .\packaging\build-agent-hub.ps1
 
 服务器的旧 WorkBuddy 映射和兼容模式保持启用。安装 0.3.0 后，先确认管理台节点显示 P3、两个来源的 offer 独立出现；随后只建立 `sn-glm-5-3-flash@raccoon` 的显式公开模型映射。映射初始关闭，12 项通过后才可启用。为测试人员创建明确列出该公开模型的团队 Key；现有通配符 Key 不会自动取得小浣熊权限。最后验证三协议的普通与流式调用、工具、红图、Responses 续写、断线和回退。小浣熊目录中的其他模型不得因为首个模型通过就直接开放。
 
-服务器实现与状态见 `/srv/app/agent-gateway/docs/agent-hub-protocol3.md` 和 `/srv/app/agent-gateway/docs/agent-hub-rollout-2026-11-13.md`。本仓库的源代码测试可运行：
+服务器实现与状态见 [protocol 3 合同](https://github.com/sensenforever-debug/agent-gateway/blob/master/docs/agent-hub-protocol3.md) 和 [灰度记录](https://github.com/sensenforever-debug/agent-gateway/blob/master/docs/agent-hub-rollout-2026-11-13.md)。本仓库的源代码测试可运行：
 
 本机统一 API 成功响应的 `model` 字段必须是请求中的来源 ID（例如 `sn-glm-5-3-flash@raccoon`），包括 Chat、Responses、Messages 及对应 SSE 事件。网关随后将该字段映射为团队使用的公开 ID。来源回显和上游静默换模由本仓库测试；公开映射与调度由服务器仓库测试。跨项目缺陷按根目录 `AGENTS.md` 中的归属规则处理。
 

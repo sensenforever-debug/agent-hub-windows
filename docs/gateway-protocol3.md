@@ -5,6 +5,9 @@ Agent Hub 0.3.0 的内置节点连接器使用 protocol 3。桌面应用继续�
 ## 节点工作方式
 
 - `NodeController` 保留原节点令牌，启动 WorkBuddy 桥后连接本机统一 API。若 WorkBuddy 桥单独不可用，连接器仍可上报可用的小浣熊来源。
+- WorkBuddy 后端版本从实际监听桥端口的进程路径识别，并经实时模型目录确认；桥不可用时，hello 不声明 WorkBuddy 来源。连接器每 5 秒检查一次，桥恢复、退出或版本改变时重连并发送新的 hello，让网关重新计算验收指纹。控制台仍在而桥子进程退出时，通过控制台写接口恢复桥。未知进程占用端口不会被认作已知 WorkBuddy 版本。
+- 两个来源分别在当前用户的 Windows 凭据管理器中维护随机 `credential_epoch`。WorkBuddy 从本机桥 `/v1/identity`、小浣熊从当前登录文件的 `office_identity` 安全识别账号变化；仅在对应来源变化时轮换 epoch。身份值和本机指纹不会发送到网关。若身份不可读取，用户在对应 Agent 页面点击“账号已更换，重新验收”；epoch 更新后连接器重连发送新 hello。
+- 本机统一 API 对成功 JSON 与每个包含 `model` 的 SSE 事件核对上游实际模型，静默换模返回 502 或中断流并发送协议错误事件；只有验证通过的模型 ID 才改写为来源 ID。
 - 连接器从 `:8788/v1/models` 每 60 秒读取动态目录，发送 `原生模型ID@workbuddy`、`原生模型ID@raccoon` 的 protocol 3 offer。目录读取失败时撤销 offer，5 秒后重试。它不使用小浣熊静态模型快照。
 - 本机调用使用 Windows 凭据管理器中已有的 `unified-local-key`。该 Key、WorkBuddy 桥令牌、登录资料和小浣熊令牌不会写进 WebSocket 的 hello、models 或请求报文。
 - 服务器按公开模型到来源模型的显式映射派发请求。连接器直接把选中的来源模型发送到 `:8788`。协议探针仍覆盖 Chat、Responses、Messages 的文本、SSE、工具往返和读图 12 项；服务器对小浣熊来源指定 512 token 预算，旧 WorkBuddy 探针保持 80。
@@ -21,7 +24,7 @@ powershell -ExecutionPolicy Bypass -File .\packaging\build-agent-hub.ps1
 
 生成 `dist\AgentHub-Setup.exe`。安装到当前 Windows 用户后，确认 Agent Hub 标题与安装器版本为 0.3.0，并在“团队网关”页查看“已连接 · protocol 3”、WorkBuddy 和小浣熊上报数量。原节点令牌沿用，无需重新配对；本机 API Key 自动沿用 `unified-local-key`。
 
-如更换本机登录账号，在管理台手动对相应来源模型复验；也可在本机配置文件中设置新的随机 `credential_epoch` 后重启 Agent Hub，使服务器的验收指纹改变。不要使用账号名称、令牌或可逆身份信息作为 epoch。
+如账号变化未被本机自动识别，在对应 Agent 页面点击“账号已更换，重新验收”。该操作只轮换对应来源的随机 epoch，并让网关重新计算该来源的验收指纹。不要将账号名称、令牌或可逆身份信息作为 epoch。
 
 ## 服务器灰度
 

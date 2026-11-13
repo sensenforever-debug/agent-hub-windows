@@ -26,6 +26,7 @@ from migration import migrate, single_instance
 from raccoon_adapter import INTERNAL_KEY, save_token
 from unified_proxy import local_key
 from unified_service import main as run_service
+import credential_epochs
 
 
 class Bus(QObject):
@@ -149,6 +150,9 @@ class Window(QMainWindow):
         pair = QPushButton("输入一次性配对码")
         pair.clicked.connect(self.pair_workbuddy)
         workbuddy.addWidget(pair, alignment=Qt.AlignmentFlag.AlignLeft)
+        changed = QPushButton("WorkBuddy 账号已更换，重新验收")
+        changed.clicked.connect(lambda: self.account_changed("workbuddy"))
+        workbuddy.addWidget(changed, alignment=Qt.AlignmentFlag.AlignLeft)
         workbuddy.addStretch()
 
         raccoon = self.page("商汤小浣熊", "使用官方桌面客户端登录；raccoon2api 源码在独立适配层中运行，仅监听本机回环地址。")
@@ -161,6 +165,9 @@ class Window(QMainWindow):
             control.clicked.connect(callback)
             buttons.addWidget(control)
         raccoon.addLayout(buttons)
+        changed = QPushButton("小浣熊账号已更换，重新验收")
+        changed.clicked.connect(lambda: self.account_changed("raccoon"))
+        raccoon.addWidget(changed, alignment=Qt.AlignmentFlag.AlignLeft)
         self.raccoon_models = QTableWidget(0, 2)
         self.raccoon_models.setHorizontalHeaderLabels(["Raccoon 模型", "本机来源 ID"])
         self.raccoon_models.horizontalHeader().setStretchLastSection(True)
@@ -197,6 +204,16 @@ class Window(QMainWindow):
     def copy_key(self):
         QApplication.clipboard().setText(local_key())
         QMessageBox.information(self, "已复制", "本机 API Key 已复制到剪贴板。请只在本机客户端中使用。")
+
+    def account_changed(self, source):
+        label = "WorkBuddy" if source == "workbuddy" else "小浣熊"
+        if QMessageBox.question(self, "重新验收", f"确认 {label} 登录账号已更换？这将只重新验收该来源。") != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            credential_epochs.rotate(source)
+            self.bus.event.emit("update_info", f"{label} 验收指纹已更新，节点将重新连接并触发复验")
+        except Exception as exc:
+            QMessageBox.warning(self, "更新失败", type(exc).__name__)
 
     def _run_service(self):
         try:
@@ -300,6 +317,8 @@ class Window(QMainWindow):
             self.logs.append(str(detail)[:300])
         elif kind == "bridge_error":
             self.logs.append("来源目录读取失败：" + str(detail)[:80])
+        elif kind == "source_changed":
+            self.logs.append(str(detail)[:100])
         elif kind == "service_error":
             self.logs.append("本机 API 启动失败：" + str(detail))
         elif kind == "update_info":

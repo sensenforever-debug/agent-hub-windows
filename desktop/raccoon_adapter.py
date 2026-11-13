@@ -21,15 +21,28 @@ _cache = {"until": 0.0, "models": []}
 
 
 def access_token():
+    record = auth_record()
+    if record:
+        return record["access_token"]
+    return keyring.get_password("agent-gateway-workbuddy-node", "raccoon-access-token")
+
+
+def auth_record():
     paths = [Path(os.environ["RACCOON_AUTH_FILE"])] if os.environ.get("RACCOON_AUTH_FILE") else [DESKTOP_AUTH_FILE, AUTH_FILE, BOX_AUTH_FILE]
     for path in paths:
         try:
-            value = json.loads(path.read_text(encoding="utf-8")).get("access_token")
-            if isinstance(value, str) and value:
-                return value
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and isinstance(data.get("access_token"), str) and data["access_token"]:
+                return data
         except (OSError, ValueError, AttributeError):
             pass
-    return keyring.get_password("agent-gateway-workbuddy-node", "raccoon-access-token")
+    return None
+
+
+def account_identity():
+    record = auth_record()
+    identity = record.get("office_identity") if record else None
+    return identity if isinstance(identity, str) and identity else None
 
 
 def save_token(value):

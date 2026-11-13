@@ -16,11 +16,13 @@ class Protocol3ConnectorTests(unittest.TestCase):
         self.assertEqual([offer['agent'] for offer in offers],['workbuddy','raccoon'])
         self.assertEqual(offers[1]['native_model'],'sn-glm-5-3-flash')
         args=type('Args',(),{'workbuddy_revision':'abc123','raccoon_revision':'def456',
-                             'adapter_revision':node.AGENT_HUB_VERSION,'credential_epoch':'random-epoch'})()
+                             'adapter_revision':node.AGENT_HUB_VERSION,
+                             'source_epochs':{'workbuddy':'epoch-workbuddy','raccoon':'epoch-raccoon'}})()
         hello=node.protocol3_hello(args)
         self.assertEqual(hello['protocol'],3)
         self.assertEqual(hello['sources'][1]['backend_revision'],'def456')
-        self.assertEqual(hello['sources'][1]['credential_epoch'],'random-epoch')
+        self.assertEqual(hello['sources'][0]['credential_epoch'],'epoch-workbuddy')
+        self.assertEqual(hello['sources'][1]['credential_epoch'],'epoch-raccoon')
         self.assertNotIn('token',str(hello).lower())
 
     def test_unavailable_workbuddy_is_omitted_until_healthy_revision_is_known(self):
@@ -65,7 +67,24 @@ class Protocol3ConnectorTests(unittest.TestCase):
                 asyncio.run(node.watch_workbuddy(socket,'http://127.0.0.1:8790',old,
                                                    lambda *event:events.append(event)))
             self.assertEqual(len(socket.closed),1)
-            self.assertEqual(events[0][0],'workbuddy_revision')
+            self.assertEqual(events[0][0],'source_changed')
+
+    def test_reconnects_when_only_one_source_epoch_changes(self):
+        class Socket:
+            def __init__(self): self.closed=[]
+            async def close(self, **kwargs): self.closed.append(kwargs)
+        async def immediate_sleep(_): pass
+        old={'workbuddy':'wb-a','raccoon':'rac-a'}
+        for changed in ({'workbuddy':'wb-a','raccoon':'rac-b'},
+                        {'workbuddy':'wb-b','raccoon':'rac-a'}):
+            socket=Socket()
+            with patch.object(node,'workbuddy_revision',return_value='a'*40), \
+                 patch.object(node,'observed_epochs',return_value=changed), \
+                 patch.object(node.asyncio,'sleep',side_effect=immediate_sleep), \
+                 patch.object(node.keyring,'get_password',return_value='secret'):
+                asyncio.run(node.watch_workbuddy(socket,'http://127.0.0.1:8790','a'*40,
+                                                  lambda *event:None,initial_epochs=old))
+            assert len(socket.closed)==1
 
     def test_raccoon_budget_and_legacy_budget(self):
         for api in ('chat','responses','messages'):

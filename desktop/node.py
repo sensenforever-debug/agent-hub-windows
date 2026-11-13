@@ -14,6 +14,8 @@ import keyring
 from websockets.asyncio.client import connect
 import probes
 import bridge_manager as bm
+import credential_epochs
+from raccoon_adapter import account_identity as raccoon_identity
 
 SERVICE = 'agent-gateway-workbuddy-node'
 AGENT_HUB_VERSION = '0.3.0'
@@ -22,14 +24,15 @@ WORKBUDDY_REVISION = '2f3c556d38896164bf138627b484662aa6f4d345'
 RACCOON_REVISION = '5f1b8e6d86b1178ef2fba7596c5869846beed0aa'
 
 def protocol3_hello(args):
-    epoch=getattr(args,'credential_epoch','')
+    epochs=getattr(args,'source_epochs',{})
     adapter=getattr(args,'adapter_revision',AGENT_HUB_VERSION)
     sources=[]
     revision=getattr(args,'workbuddy_revision',None)
     if revision and revision!='unknown':
-        sources.append({'agent':'workbuddy','backend_revision':revision,'credential_epoch':epoch})
+        sources.append({'agent':'workbuddy','backend_revision':revision,
+                        'credential_epoch':epochs.get('workbuddy','')})
     sources.append({'agent':'raccoon','backend_revision':getattr(args,'raccoon_revision',RACCOON_REVISION),
-                    'adapter_revision':adapter,'credential_epoch':epoch})
+                    'adapter_revision':adapter,'credential_epoch':epochs.get('raccoon','')})
     return {'type':'hello','protocol':3,'agent_revision':'agent-hub/'+adapter,'sources':sources}
 
 def hub_offers(names, declared_sources=None):
@@ -62,15 +65,37 @@ async def workbuddy_revision(base, token, start_if_missing=False, dashboard_port
     return None
 
 
-async def watch_workbuddy(ws, base, initial_revision, report, dashboard_port=8792):
+async def workbuddy_identity(base, token):
+    if not token:
+        return None
+    try:
+        async with httpx.AsyncClient(base_url=base, timeout=5, trust_env=False) as client:
+            response = await client.get('/v1/identity', headers={'Authorization':'Bearer '+token})
+            response.raise_for_status()
+            auth = response.json().get('auth', {})
+            user_id = auth.get('userId') if isinstance(auth, dict) else None
+            return user_id if isinstance(user_id, str) and user_id else None
+    except (httpx.HTTPError, ValueError, AttributeError):
+        return None
+
+
+async def observed_epochs(base, token):
+    identity = await workbuddy_identity(base, token)
+    return {'workbuddy':credential_epochs.current('workbuddy', identity),
+            'raccoon':credential_epochs.current('raccoon', raccoon_identity())}
+
+
+async def watch_workbuddy(ws, base, initial_revision, report, dashboard_port=8792, initial_epochs=None):
     while True:
         await asyncio.sleep(5)
+        token = keyring.get_password(SERVICE,'bridge-token')
         actual = await workbuddy_revision(
-            base, keyring.get_password(SERVICE,'bridge-token'), start_if_missing=True,
+            base, token, start_if_missing=True,
             dashboard_port=dashboard_port)
-        if actual != initial_revision:
-            report('workbuddy_revision', actual or '不可用')
-            await ws.close(code=1000, reason='WorkBuddy version changed')
+        epochs = await observed_epochs(base, token) if initial_epochs is not None else None
+        if actual != initial_revision or (initial_epochs is not None and epochs != initial_epochs):
+            report('source_changed', '来源版本或账号验收指纹已更新')
+            await ws.close(code=1000, reason='Source validation fingerprint changed')
             return
 
 def config():
@@ -86,7 +111,6 @@ def config():
     p.add_argument('--workbuddy-bridge', default=os.environ.get('AG_WORKBUDDY_BRIDGE','http://127.0.0.1:8790'))
     p.add_argument('--raccoon-revision', default=os.environ.get('AG_RACCOON_REVISION',RACCOON_REVISION))
     p.add_argument('--adapter-revision', default=os.environ.get('AG_HUB_ADAPTER_REVISION',AGENT_HUB_VERSION))
-    p.add_argument('--credential-epoch', default=os.environ.get('AG_CREDENTIAL_EPOCH',''))
     args=p.parse_args()
     if not args.bridge: args.bridge='http://127.0.0.1:8788' if args.protocol==3 else 'http://127.0.0.1:8790'
     return args
@@ -114,9 +138,11 @@ async def main(a, status=None):
         while True:
             try:
                 if protocol==3:
+                    workbuddy_token = keyring.get_password(SERVICE,'bridge-token')
                     a.workbuddy_revision = await workbuddy_revision(
-                        workbuddy_base, keyring.get_password(SERVICE,'bridge-token'), start_if_missing=True,
+                        workbuddy_base, workbuddy_token, start_if_missing=True,
                         dashboard_port=getattr(a,'dashboard_port',8792))
+                    a.source_epochs = await observed_epochs(workbuddy_base, workbuddy_token)
                 async with connect(a.gateway,additional_headers={'Authorization':f'Bearer {node_token}'},max_size=6*1024*1024,ping_interval=20,ping_timeout=20) as ws:
                     print('Connected to gateway',flush=True)
                     report('connected')
@@ -159,7 +185,8 @@ async def main(a, status=None):
                                 await asyncio.sleep(5)
                     refresh = asyncio.create_task(refresh_models())
                     monitor = asyncio.create_task(watch_workbuddy(
-                        ws, workbuddy_base, a.workbuddy_revision, report, getattr(a,'dashboard_port',8792))) if protocol==3 else None
+                        ws, workbuddy_base, a.workbuddy_revision, report, getattr(a,'dashboard_port',8792),
+                        a.source_epochs)) if protocol==3 else None
                     async def handle(m):
                         req_id = m['id']
                         headers = {'Authorization':f'Bearer {bridge_token}','x-api-key':bridge_token,'Content-Type':'application/json'}

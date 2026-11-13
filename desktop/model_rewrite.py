@@ -3,6 +3,35 @@
 import json
 
 
+class ModelMismatch(Exception):
+    """A successful upstream response identified a different model."""
+
+
+def validate_model_fields(value, native_model: str, require_model=False):
+    if not isinstance(value, dict):
+        if require_model:
+            raise ModelMismatch('upstream response did not identify a model')
+        return
+    actual = value.get('model')
+    if require_model and (not isinstance(actual, str) or not actual):
+        raise ModelMismatch('upstream response did not identify a model')
+    if isinstance(actual, str) and actual and actual.lower() != native_model.lower():
+        raise ModelMismatch('upstream model does not match the requested source')
+    for key in ('response', 'message', 'data'):
+        if isinstance(value.get(key), dict):
+            validate_model_fields(value[key], native_model)
+
+
+def validate_sse_frame(frame: bytes, native_model: str):
+    try:
+        data_lines = [line[5:].lstrip() for line in frame.decode('utf-8').splitlines()
+                      if line.startswith('data:')]
+        if data_lines and data_lines != ['[DONE]']:
+            validate_model_fields(json.loads('\n'.join(data_lines)), native_model)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ModelMismatch('invalid upstream SSE event') from exc
+
+
 def public_model_fields(value, source_model: str, public_model: str):
     if not isinstance(value, dict):
         return value
@@ -65,9 +94,12 @@ class ModelResponseRewriter:
                 return [json.dumps(adjusted, ensure_ascii=False, separators=(',', ':')).encode()]
             except (ValueError, UnicodeDecodeError):
                 return [data]
+        if data:
+            validate_sse_frame(data, self.source_model)
         return [data] if data else []
 
     def _event(self, frame: bytes, separator: bytes) -> bytes:
+        validate_sse_frame(frame, self.source_model)
         try:
             lines = frame.decode().splitlines()
             data_lines = [line[5:].lstrip() for line in lines if line.startswith('data:')]

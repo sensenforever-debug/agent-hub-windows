@@ -51,8 +51,7 @@ class NodeController:
         args = SimpleNamespace(gateway=gateway, bridge="http://127.0.0.1:8788", protocol=3,
                                workbuddy_bridge=workbuddy_bridge, dashboard_port=int(config.get("dashboard_port", 8792)),
                                raccoon_revision=node.RACCOON_REVISION,
-                               adapter_revision=node.AGENT_HUB_VERSION,
-                               credential_epoch=config.get("credential_epoch", ""))
+                               adapter_revision=node.AGENT_HUB_VERSION)
 
         def run():
             self.loop = asyncio.new_event_loop()

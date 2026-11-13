@@ -41,19 +41,16 @@ class NodeController:
                 bridge_token = file.read_text(encoding="utf-8").strip()
                 if bridge_token:
                     keyring.set_password(node.SERVICE, "bridge-token", bridge_token)
-        try:
-            revision = bm.active()[1] or "unknown"
-        except (OSError, ValueError, KeyError):
-            revision = "unknown"
         if bridge_token:
             try:
-                self.bridge_process, revision = bm.start_bridge(workbuddy_bridge)
+                self.bridge_process, _ = bm.start_bridge(workbuddy_bridge, int(config.get("dashboard_port", 8792)))
             except Exception as exc:
                 self.notify("gateway", "WorkBuddy 桥暂不可用：" + type(exc).__name__)
         else:
             self.notify("gateway", "WorkBuddy 桥令牌缺失；继续连接可用来源")
         args = SimpleNamespace(gateway=gateway, bridge="http://127.0.0.1:8788", protocol=3,
-                               workbuddy_revision=revision, raccoon_revision=node.RACCOON_REVISION,
+                               workbuddy_bridge=workbuddy_bridge, dashboard_port=int(config.get("dashboard_port", 8792)),
+                               raccoon_revision=node.RACCOON_REVISION,
                                adapter_revision=node.AGENT_HUB_VERSION,
                                credential_epoch=config.get("credential_epoch", ""))
 

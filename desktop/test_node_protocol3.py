@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import asyncio
 from pathlib import Path
 from unittest.mock import patch
 
@@ -21,6 +22,50 @@ class Protocol3ConnectorTests(unittest.TestCase):
         self.assertEqual(hello['sources'][1]['backend_revision'],'def456')
         self.assertEqual(hello['sources'][1]['credential_epoch'],'random-epoch')
         self.assertNotIn('token',str(hello).lower())
+
+    def test_unavailable_workbuddy_is_omitted_until_healthy_revision_is_known(self):
+        args=type('Args',(),{'workbuddy_revision':None,'raccoon_revision':node.RACCOON_REVISION})()
+        hello=node.protocol3_hello(args)
+        self.assertEqual([source['agent'] for source in hello['sources']], ['raccoon'])
+        names=['glm-5.3@workbuddy','sn-glm-5-3-flash@raccoon']
+        self.assertEqual([offer['source_model'] for offer in node.hub_offers(names, {'raccoon'})],
+                         ['sn-glm-5-3-flash@raccoon'])
+        args.workbuddy_revision='a'*40
+        self.assertEqual(node.protocol3_hello(args)['sources'][0]['backend_revision'], 'a'*40)
+        args.workbuddy_revision='b'*40
+        self.assertEqual(node.protocol3_hello(args)['sources'][0]['backend_revision'], 'b'*40)
+
+    def test_revision_requires_running_process_and_live_model_catalog(self):
+        class Response:
+            def raise_for_status(self): pass
+            def json(self): return {'data':[{'id':'glm-5.3'}]}
+        class Client:
+            def __init__(self, **kwargs): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *args): pass
+            async def get(self, *args, **kwargs): return Response()
+        with patch.object(node.bm, 'running_revision', side_effect=[None,'a'*40,'b'*40]), \
+             patch.object(node.bm, 'port_open', return_value=True), \
+             patch.object(node.httpx, 'AsyncClient', Client):
+            versions=[asyncio.run(node.workbuddy_revision('http://127.0.0.1:8790','secret'))
+                      for _ in range(3)]
+        self.assertEqual(versions,[None,'a'*40,'b'*40])
+
+    def test_reconnects_when_workbuddy_recovers_or_changes_version(self):
+        class Socket:
+            def __init__(self): self.closed=[]
+            async def close(self, **kwargs): self.closed.append(kwargs)
+        async def immediate_sleep(_): pass
+        for old,new in ((None,'a'*40),('a'*40,'b'*40),('a'*40,None)):
+            socket=Socket()
+            events=[]
+            with patch.object(node, 'workbuddy_revision', return_value=new), \
+                 patch.object(node.asyncio, 'sleep', side_effect=immediate_sleep), \
+                 patch.object(node.keyring, 'get_password', return_value='secret'):
+                asyncio.run(node.watch_workbuddy(socket,'http://127.0.0.1:8790',old,
+                                                   lambda *event:events.append(event)))
+            self.assertEqual(len(socket.closed),1)
+            self.assertEqual(events[0][0],'workbuddy_revision')
 
     def test_raccoon_budget_and_legacy_budget(self):
         for api in ('chat','responses','messages'):

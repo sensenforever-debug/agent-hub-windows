@@ -1,0 +1,16 @@
+.build-venv/
+.build-work/
+build/
+dist/
+runtime/
+vendor/upstream.zip
+vendor/raccoon2api/
+vendor/Coding2API/
+__pycache__/
+*.pyc
+*.log
+/(3
+/docs/gateway-raccoon-upgrade-report-*.md
+/packaging/check-validation.py
+/packaging/download-location.conf
+/packaging/publish-remote.sh

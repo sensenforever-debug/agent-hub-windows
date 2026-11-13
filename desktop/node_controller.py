@@ -27,6 +27,13 @@ class NodeController:
         if not keyring.get_password(node.SERVICE, "node-token"):
             self.notify("gateway", "尚未配对")
             return
+        try:
+            config = json.loads(CONFIG.read_text(encoding="utf-8-sig")) if CONFIG.is_file() else {}
+            workbuddy_bridge = bm.bridge_url(config.get("bridge", "http://127.0.0.1:8790"))
+            gateway = config.get("gateway", "wss://api.435038537.xyz/node/ws")
+        except Exception as exc:
+            self.notify("gateway", "配置错误：" + type(exc).__name__)
+            return
         bridge_token = keyring.get_password(node.SERVICE, "bridge-token")
         if not bridge_token:
             file = Path.home() / ".workbuddy-bridge/bridge-token"
@@ -34,18 +41,17 @@ class NodeController:
                 bridge_token = file.read_text(encoding="utf-8").strip()
                 if bridge_token:
                     keyring.set_password(node.SERVICE, "bridge-token", bridge_token)
-        if not bridge_token:
-            self.notify("gateway", "缺少本地桥令牌")
-            return
-        try:
-            config = json.loads(CONFIG.read_text(encoding="utf-8-sig")) if CONFIG.is_file() else {}
-            bridge = bm.bridge_url(config.get("bridge", "http://127.0.0.1:8790"))
-            gateway = config.get("gateway", "wss://api.435038537.xyz/node/ws")
-            self.bridge_process, revision = bm.start_bridge(bridge)
-        except Exception as exc:
-            self.notify("gateway", "启动失败：" + type(exc).__name__)
-            return
-        args = SimpleNamespace(gateway=gateway, bridge=bridge, bridge_revision=revision)
+        if bridge_token:
+            try:
+                self.bridge_process, _ = bm.start_bridge(workbuddy_bridge, int(config.get("dashboard_port", 8792)))
+            except Exception as exc:
+                self.notify("gateway", "WorkBuddy 桥暂不可用：" + type(exc).__name__)
+        else:
+            self.notify("gateway", "WorkBuddy 桥令牌缺失；继续连接可用来源")
+        args = SimpleNamespace(gateway=gateway, bridge="http://127.0.0.1:8788", protocol=3,
+                               workbuddy_bridge=workbuddy_bridge, dashboard_port=int(config.get("dashboard_port", 8792)),
+                               raccoon_revision=node.RACCOON_REVISION,
+                               adapter_revision=node.AGENT_HUB_VERSION)
 
         def run():
             self.loop = asyncio.new_event_loop()
@@ -60,7 +66,7 @@ class NodeController:
             finally:
                 self.loop.close()
                 self.loop = self.task = None
-        self.worker = threading.Thread(target=run, name="workbuddy-gateway", daemon=True)
+        self.worker = threading.Thread(target=run, name="agent-hub-gateway", daemon=True)
         self.worker.start()
         self.notify("gateway", "连接中")
 

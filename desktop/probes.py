@@ -37,27 +37,27 @@ def text_of(api, data):
 def path(api): return {'chat':'/v1/chat/completions','responses':'/v1/responses','messages':'/v1/messages'}[api]
 
 
-def base_body(api, model, prompt=PROMPT, stream=False):
-    if api=='chat': return {'model':model,'messages':[{'role':'user','content':prompt}],'max_tokens':80,'stream':stream}
-    if api=='responses': return {'model':model,'input':prompt,'max_output_tokens':80,'stream':stream,'store':False}
-    return {'model':model,'messages':[{'role':'user','content':prompt}],'max_tokens':80,'stream':stream}
+def base_body(api, model, prompt=PROMPT, stream=False, budget=80):
+    if api=='chat': return {'model':model,'messages':[{'role':'user','content':prompt}],'max_tokens':budget,'stream':stream}
+    if api=='responses': return {'model':model,'input':prompt,'max_output_tokens':budget,'stream':stream,'store':False}
+    return {'model':model,'messages':[{'role':'user','content':prompt}],'max_tokens':budget,'stream':stream}
 
 
 async def post(http: httpx.AsyncClient, api: str, model: str, token: str, body):
     headers={'Authorization':'Bearer '+token,'x-api-key':token,'anthropic-version':'2023-06-01'}
-    response=await http.post(path(api),headers=headers,json=body,timeout=45)
+    response=await http.post(path(api),headers=headers,json=body,timeout=90)
     if response.status_code != 200:
         raise ValueError(f'HTTP {response.status_code}')
     return response
 
 
-async def check_text(http, api, model, token):
-    data=(await post(http,api,model,token,base_body(api,model))).json()
+async def check_text(http, api, model, token, budget=80):
+    data=(await post(http,api,model,token,base_body(api,model,budget=budget))).json()
     if not text_of(api,data).strip(): raise ValueError('empty text')
 
 
-async def check_stream(http, api, model, token):
-    response=await post(http,api,model,token,base_body(api,model,stream=True))
+async def check_stream(http, api, model, token, budget=80):
+    response=await post(http,api,model,token,base_body(api,model,stream=True,budget=budget))
     if 'text/event-stream' not in response.headers.get('content-type',''):
         raise ValueError('not SSE')
     body=response.text
@@ -65,8 +65,8 @@ async def check_stream(http, api, model, token):
     if marker not in body: raise ValueError('missing stream completion')
 
 
-async def check_image(http, api, model, token):
-    body=base_body(api,model)
+async def check_image(http, api, model, token, budget=80):
+    body=base_body(api,model,budget=budget)
     if api=='chat':
         body['messages'][0]['content']=[{'type':'text','text':IMAGE_PROMPT},{'type':'image_url','image_url':{'url':DATA_URI}}]
     elif api=='responses':
@@ -79,10 +79,10 @@ async def check_image(http, api, model, token):
         raise ValueError('image color not recognized')
 
 
-async def check_tool(http, api, model, token):
+async def check_tool(http, api, model, token, budget=80):
     name='gateway_echo_value'
     prompt='Call gateway_echo_value exactly once and report the returned value.'
-    body=base_body(api,model,prompt)
+    body=base_body(api,model,prompt,budget=budget)
     if api=='chat':
         tools=[{'type':'function','function':{'name':name,'description':'Get the test value','parameters':{'type':'object','properties':{},'required':[]}}}]
         body.update(tools=tools,tool_choice={'type':'function','function':{'name':name}})
@@ -112,14 +112,14 @@ async def check_tool(http, api, model, token):
     if not text_of(api,data).strip(): raise ValueError('tool result not consumed')
 
 
-async def run_model(http: httpx.AsyncClient, model: str, token: str, report=None):
+async def run_model(http: httpx.AsyncClient, model: str, token: str, report=None, budget=80):
     results={}
     checks={'text':check_text,'stream':check_stream,'tool':check_tool,'image':check_image}
     for api in ('chat','responses','messages'):
         for name,check in checks.items():
             case=f'{api}_{name}'
             try:
-                await check(http,api,model,token)
+                await check(http,api,model,token,budget)
                 results[case]=True
             except (httpx.HTTPError,ValueError,KeyError,IndexError,TypeError,json.JSONDecodeError) as exc:
                 results[case]=type(exc).__name__+': '+str(exc)[:90]

@@ -1,5 +1,5 @@
 #define AppName "Agent Hub 统一代理"
-#define AppVersion "0.2.2"
+#define AppVersion "0.3.0"
 [Setup]
 AppId={{7D9C731D-14F9-43DD-B34A-1952E6C02F0C}
 AppName={#AppName}

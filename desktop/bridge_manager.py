@@ -12,6 +12,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 import httpx
 import psutil
+import re
 
 UPSTREAM = "Ianzhyh/workbuddy-to-dsh"
 BASE_REVISION = "2f3c556d38896164bf138627b484662aa6f4d345"
@@ -19,6 +20,7 @@ APP_DATA = Path(os.environ.get("APPDATA", Path.home())) / "AgentGatewayNode"
 STORE = APP_DATA / "upstream"
 MANIFEST = STORE / "active.json"
 LEGACY = APP_DATA / "workbuddy-to-dsh"
+REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
 def bundle_dir():
@@ -137,12 +139,12 @@ def activate(revision, bridge_base, token, dashboard_port=8792):
     stop_bridge(bridge_base, dashboard_port, old)
     _write_manifest(revision, old_revision)
     try:
-        start_bridge(bridge_base)
+        start_bridge(bridge_base, dashboard_port)
         verify_models(bridge_base, token)
     except Exception:
         stop_bridge(bridge_base, dashboard_port, candidate)
         _write_manifest(old_revision, revision)
-        start_bridge(bridge_base)
+        start_bridge(bridge_base, dashboard_port)
         raise
     return old_revision
 
@@ -156,12 +158,12 @@ def rollback(bridge_base, token, dashboard_port=8792):
     stop_bridge(bridge_base, dashboard_port, current)
     _write_manifest(previous, data["revision"])
     try:
-        start_bridge(bridge_base)
+        start_bridge(bridge_base, dashboard_port)
         verify_models(bridge_base, token)
     except Exception:
         stop_bridge(bridge_base, dashboard_port, STORE / previous)
         _write_manifest(data["revision"], previous)
-        start_bridge(bridge_base)
+        start_bridge(bridge_base, dashboard_port)
         raise
     return previous
 
@@ -191,7 +193,7 @@ def stop_bridge(base, dashboard_port, source):
     dashboard = f"http://127.0.0.1:{int(dashboard_port)}"
     try:
         with httpx.Client(timeout=12, trust_env=False) as client:
-            client.post(dashboard + "/api/bridge/stop")
+            client.post(dashboard + "/api/bridge/stop", headers={"x-workbuddy-panel": "1"})
     except httpx.HTTPError:
         pass
     server_script = str((source / "dashboard" / "server.mjs").resolve()).lower()
@@ -213,11 +215,57 @@ def port_open(port):
         return False
 
 
-def start_bridge(base):
+def listener_source(port, folder, script_name):
+    """Find the source tree of a known listener without trusting the active manifest."""
+    try:
+        connections = psutil.net_connections(kind="tcp")
+    except (psutil.AccessDenied, OSError):
+        return None
+    for connection in connections:
+        if (connection.status != psutil.CONN_LISTEN or not connection.laddr or
+                connection.laddr.port != port or not connection.pid or
+                connection.laddr.ip not in ("127.0.0.1", "::1")):
+            continue
+        try:
+            arguments = psutil.Process(connection.pid).cmdline()
+        except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
+            continue
+        for argument in arguments:
+            script = Path(argument)
+            if script.name.lower() != script_name or script.parent.name.lower() != folder:
+                continue
+            return script.parent.parent.resolve()
+    return None
+
+
+def running_revision(base):
+    """Identify the source tree of the process actually listening on the bridge port."""
+    source = listener_source(urlparse(bridge_url(base)).port, "bridge", "workbuddy-bridge.mjs")
+    if source == LEGACY.resolve():
+        return BASE_REVISION
+    if source and source.parent == STORE.resolve() and REVISION_RE.fullmatch(source.name):
+        return source.name
+    return None
+
+
+def start_bridge(base, dashboard_port=8792):
     bridge_url(base)
     path, revision = ensure_initial()
     if port_open(urlparse(base).port):
         return None, revision
+    dashboard_source = listener_source(int(dashboard_port), "dashboard", "server.mjs")
+    if dashboard_source:
+        if dashboard_source != path.resolve():
+            raise RuntimeError("运行中的控制台与所选桥版本不一致")
+        with httpx.Client(timeout=20, trust_env=False) as client:
+            response = client.post(f"http://127.0.0.1:{int(dashboard_port)}/api/bridge/start",
+                                   headers={"x-workbuddy-panel": "1"})
+            response.raise_for_status()
+            if not response.json().get("started"):
+                raise RuntimeError("控制台未能恢复 WorkBuddy 桥")
+        return None, revision
+    if port_open(int(dashboard_port)):
+        raise RuntimeError("控制台端口被未知进程占用")
     if not node_exe():
         raise FileNotFoundError("缺少 Node.js 运行时")
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)

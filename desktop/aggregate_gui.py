@@ -20,11 +20,13 @@ from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel, QListW
                                QWidget)
 
 from node_controller import NodeController
+from node import AGENT_HUB_VERSION
 import bridge_manager as bm
 from migration import migrate, single_instance
 from raccoon_adapter import INTERNAL_KEY, save_token
 from unified_proxy import local_key
 from unified_service import main as run_service
+import credential_epochs
 
 
 class Bus(QObject):
@@ -49,13 +51,15 @@ def card(title, detail=""):
 class Window(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Agent Hub · 统一代理")
+        self.setWindowTitle(f"Agent Hub {AGENT_HUB_VERSION} · 统一代理")
         self.resize(1180, 760)
         self.bus = Bus()
         self.bus.snapshot.connect(self.apply_snapshot)
         self.bus.event.connect(self.on_event)
         self.node = NodeController(lambda kind, detail="": self.bus.event.emit(kind, detail))
         self.gateway_status = "连接中"
+        self.gateway_models = []
+        self.gateway_validation = ""
         self.exiting = False
         self._polling = False
         self.pages = QStackedWidget()
@@ -146,6 +150,9 @@ class Window(QMainWindow):
         pair = QPushButton("输入一次性配对码")
         pair.clicked.connect(self.pair_workbuddy)
         workbuddy.addWidget(pair, alignment=Qt.AlignmentFlag.AlignLeft)
+        changed = QPushButton("WorkBuddy 账号已更换，重新验收")
+        changed.clicked.connect(lambda: self.account_changed("workbuddy"))
+        workbuddy.addWidget(changed, alignment=Qt.AlignmentFlag.AlignLeft)
         workbuddy.addStretch()
 
         raccoon = self.page("商汤小浣熊", "使用官方桌面客户端登录；raccoon2api 源码在独立适配层中运行，仅监听本机回环地址。")
@@ -158,6 +165,9 @@ class Window(QMainWindow):
             control.clicked.connect(callback)
             buttons.addWidget(control)
         raccoon.addLayout(buttons)
+        changed = QPushButton("小浣熊账号已更换，重新验收")
+        changed.clicked.connect(lambda: self.account_changed("raccoon"))
+        raccoon.addWidget(changed, alignment=Qt.AlignmentFlag.AlignLeft)
         self.raccoon_models = QTableWidget(0, 2)
         self.raccoon_models.setHorizontalHeaderLabels(["Raccoon 模型", "本机来源 ID"])
         self.raccoon_models.horizontalHeader().setStretchLastSection(True)
@@ -194,6 +204,16 @@ class Window(QMainWindow):
     def copy_key(self):
         QApplication.clipboard().setText(local_key())
         QMessageBox.information(self, "已复制", "本机 API Key 已复制到剪贴板。请只在本机客户端中使用。")
+
+    def account_changed(self, source):
+        label = "WorkBuddy" if source == "workbuddy" else "小浣熊"
+        if QMessageBox.question(self, "重新验收", f"确认 {label} 登录账号已更换？这将只重新验收该来源。") != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            credential_epochs.rotate(source)
+            self.bus.event.emit("update_info", f"{label} 验收指纹已更新，节点将重新连接并触发复验")
+        except Exception as exc:
+            QMessageBox.warning(self, "更新失败", type(exc).__name__)
 
     def _run_service(self):
         try:
@@ -282,13 +302,23 @@ class Window(QMainWindow):
 
     def on_event(self, kind, detail):
         if kind == "connected":
-            self.gateway_status = "已连接"
+            self.gateway_status = "已连接 · protocol 3"
         elif kind == "disconnected":
             self.gateway_status = "已断开"
         elif kind == "gateway":
             self.gateway_status = str(detail)
+        elif kind == "models":
+            self.gateway_models = list(detail)
+        elif kind == "validation":
+            self.gateway_validation = (str(detail.get("model", "")) +
+                                       (" 验收通过" if detail.get("passed") else " 验收未通过"))
+            self.logs.append(self.gateway_validation[:300])
         elif kind == "probe":
             self.logs.append(str(detail)[:300])
+        elif kind == "bridge_error":
+            self.logs.append("来源目录读取失败：" + str(detail)[:80])
+        elif kind == "source_changed":
+            self.logs.append(str(detail)[:100])
         elif kind == "service_error":
             self.logs.append("本机 API 启动失败：" + str(detail))
         elif kind == "update_info":
@@ -298,7 +328,13 @@ class Window(QMainWindow):
             revision, title = detail
             if QMessageBox.question(self, "WorkBuddy 桥升级", f"下载并验证 {revision[:12]}？\n{title}") == QMessageBox.StandardButton.Yes:
                 threading.Thread(target=self._switch_workbuddy, args=(revision,), daemon=True).start()
-        self.gateway_info.setText(self.gateway_status)
+        self.gateway_info.setText(self._gateway_summary())
+
+    def _gateway_summary(self):
+        workbuddy = sum(model.endswith("@workbuddy") for model in self.gateway_models)
+        raccoon = sum(model.endswith("@raccoon") for model in self.gateway_models)
+        text = f"{self.gateway_status} · 上报 WorkBuddy {workbuddy} / 小浣熊 {raccoon} 个来源模型"
+        return text + (" · " + self.gateway_validation if self.gateway_validation else "")
 
     def closeEvent(self, event):
         if self.exiting or not self.tray.isVisible():
@@ -344,7 +380,7 @@ class Window(QMainWindow):
         self.overview_values[0].setText(data["api"])
         self.overview_values[1].setText(data["workbuddy"])
         self.overview_values[2].setText(data["raccoon"])
-        self.overview_values[3].setText(self.gateway_status)
+        self.overview_values[3].setText(self._gateway_summary())
         self.workbuddy_info.setText(data["workbuddy"])
         self.raccoon_info.setText(("官方客户端运行中 · " if data.get("raccoon_client") else "官方客户端未运行 · ") +
                                   data["raccoon"] + (" · 到期 " + str(data["raccoon_expiry"]) if data.get("raccoon_expiry") else ""))

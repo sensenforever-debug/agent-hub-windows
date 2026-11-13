@@ -11,6 +11,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from raccoon_adapter import INTERNAL_KEY, catalog, check_model_echo
 from raccoon_protocols import adapted_stream, from_chat, to_chat
+from model_rewrite import (ModelMismatch, ModelResponseRewriter, public_model_fields,
+                           validate_model_fields, validate_sse_frame)
 
 SERVICE = "agent-gateway-workbuddy-node"
 LOCAL_KEY_NAME = "unified-local-key"
@@ -25,6 +27,15 @@ def local_key():
         value = "agl_" + secrets.token_urlsafe(32)
         keyring.set_password(SERVICE, LOCAL_KEY_NAME, value)
     return value
+
+
+def stream_failure(path):
+    error = {"type": "upstream_model_mismatch", "message": "Upstream model changed during streaming"}
+    if path == "/v1/responses":
+        return ("event: response.failed\ndata: " + json.dumps({"type": "response.failed", "error": error}) + "\n\n").encode()
+    if path == "/v1/messages":
+        return ("event: error\ndata: " + json.dumps({"type": "error", "error": error}) + "\n\n").encode()
+    return ("data: " + json.dumps({"error": error}) + "\n\n").encode()
 
 
 def authorize(request: Request):
@@ -125,30 +136,38 @@ async def forward(request: Request, path: str):
     if payload.get("stream"):
         stream = upstream.aiter_raw()
         first = b""
-        if agent == "raccoon" and upstream.status_code < 400:
+        if upstream.status_code < 400 and "text/event-stream" in content_type:
             try:
-                while b"\n\n" not in first and len(first) <= 65536:
+                while b"\n\n" not in first and b"\r\n\r\n" not in first and len(first) <= 65536:
                     first += await anext(stream)
                 if len(first) > 65536:
-                    raise ValueError("Raccoon stream header is too large")
-                event = first.split(b"\n\n", 1)[0].decode("utf-8", "replace")
-                for line in event.splitlines():
-                    if line.startswith("data: ") and line[6:] != "[DONE]":
-                        check_model_echo(native, json.loads(line[6:]))
-            except (ValueError, StopAsyncIteration) as exc:
+                    raise ModelMismatch("upstream stream event is too large")
+                frame = first.split(b"\r\n\r\n", 1)[0] if b"\r\n\r\n" in first else first.split(b"\n\n", 1)[0]
+                validate_sse_frame(frame, native)
+            except (ModelMismatch, StopAsyncIteration) as exc:
                 await upstream.aclose()
                 await client.aclose()
-                raise HTTPException(502, f"Raccoon stream validation failed: {exc}")
+                raise HTTPException(502, str(exc))
         async def chunks():
             try:
-                if adapter_messages is not None and upstream.status_code < 400:
-                    async for chunk in adapted_stream(path, first, stream, native, model_id, adapter_messages):
-                        yield chunk
-                else:
-                    if first:
-                        yield first
-                    async for chunk in stream:
-                        yield chunk
+                try:
+                    if adapter_messages is not None and upstream.status_code < 400:
+                        async for chunk in adapted_stream(path, first, stream, native, model_id, adapter_messages):
+                            yield chunk
+                    else:
+                        rewriter = ModelResponseRewriter(native, model_id, content_type, MAX_BODY) if upstream.status_code < 400 else None
+                        if first:
+                            for chunk in rewriter.feed(first) if rewriter else (first,):
+                                yield chunk
+                        async for chunk in stream:
+                            for translated in rewriter.feed(chunk) if rewriter else (chunk,):
+                                yield translated
+                        if rewriter:
+                            for chunk in rewriter.finish():
+                                yield chunk
+                except (ModelMismatch, ValueError) as exc:
+                    yield stream_failure(path)
+                    raise RuntimeError("upstream model changed during streaming") from exc
             finally:
                 await upstream.aclose()
                 await client.aclose()
@@ -158,13 +177,17 @@ async def forward(request: Request, path: str):
     await upstream.aclose()
     await client.aclose()
     parsed = json.loads(data) if "json" in content_type else {"raw": data.decode(errors="replace")}
-    if agent == "raccoon" and upstream.status_code < 400:
+    if upstream.status_code < 400:
         try:
-            check_model_echo(native, parsed)
-        except ValueError as exc:
+            validate_model_fields(parsed, native, require_model=True)
+            if agent == "raccoon":
+                check_model_echo(native, parsed)
+        except (ModelMismatch, ValueError) as exc:
             raise HTTPException(502, str(exc))
-        if adapter_messages is not None:
+        if agent == "raccoon" and adapter_messages is not None:
             parsed = from_chat(path, parsed, model_id, adapter_messages)
+    if upstream.status_code < 400:
+        parsed = public_model_fields(parsed, native, model_id)
     return JSONResponse(content=parsed,
                         status_code=upstream.status_code)
 
